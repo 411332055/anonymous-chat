@@ -24,7 +24,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # 階段二:把 Supabase 的網址和公開金鑰帶進網頁。
+      # 這兩個值放在 repo 的 Settings → Secrets and variables → Actions → Variables。
+      # 沒設定時是空字串,網頁會自動退回示範模式(假資料)。
       - run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
