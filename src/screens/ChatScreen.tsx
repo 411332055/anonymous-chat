@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { ChangeNicknameDialog } from '../components/ChangeNicknameDialog'
 import { ConnectionBanner } from '../components/ConnectionBanner'
 import { DemoBanner } from '../components/DemoBanner'
 import { MessageInput } from '../components/MessageInput'
@@ -23,7 +22,6 @@ export function ChatScreen({ service, nickname, initial, onLeave }: Props) {
   const chat = useChat(service, initial)
   useUnreadTitle(chat.items, chat.clientId)
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [confirming, setConfirming] = useState(false)
 
   // 手機的在線名單:按 Esc 也能關
   useEffect(() => {
@@ -56,7 +54,7 @@ export function ChatScreen({ service, nickname, initial, onLeave }: Props) {
           <span>
             你是 <b>{nickname}</b>
           </span>
-          <button type="button" className="btn change" onClick={() => setConfirming(true)}>
+          <button type="button" className="btn change" onClick={onLeave}>
             換代號
           </button>
         </div>
@@ -80,10 +78,6 @@ export function ChatScreen({ service, nickname, initial, onLeave }: Props) {
       </div>
 
       {drawerOpen && <div className="drawer-scrim" onClick={() => setDrawerOpen(false)} />}
-
-      {confirming && (
-        <ChangeNicknameDialog onCancel={() => setConfirming(false)} onConfirm={onLeave} />
-      )}
     </div>
   )
 }

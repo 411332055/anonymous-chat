@@ -89,6 +89,7 @@ button, input, textarea { font: inherit; color: inherit; }
 .prompt .count { color: var(--dim); font-size: 12px; }
 .prompt .count.bad { color: var(--bad); }
 .join .err { min-height: 22px; margin: 8px 0 18px; color: var(--bad); font-size: 13px; max-width: 420px; }
+.join .err.info { color: var(--dim); }
 .join .btn { padding: 9px 22px; }
 
 /* ---------- 畫面 B:聊天室 ---------- */
@@ -186,16 +187,6 @@ button, input, textarea { font: inherit; color: inherit; }
 .side li .you { color: var(--dim); }
 
 .drawer-scrim { display: none; }
-
-/* ---------- 畫面 C:換代號確認 ---------- */
-.scrim {
-  position: absolute; inset: 0; background: var(--scrim); z-index: 20;
-  display: flex; align-items: center; justify-content: center; padding: 20px;
-}
-.dialog { width: 380px; max-width: 100%; background: var(--panel); border: 1px solid var(--line); padding: 22px 22px 18px; }
-.dialog h5 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
-.dialog p { margin: 0 0 20px; color: var(--dim); }
-.dialog .acts { display: flex; justify-content: flex-end; gap: 10px; }
 
 /* 觸控裝置(手機)沒有 Shift 鍵,不顯示「Enter 送出,Shift+Enter 換行」的提示 */
 @media (pointer: coarse) { .composer .hint-d { display: none; } }

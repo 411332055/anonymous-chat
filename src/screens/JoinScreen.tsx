@@ -7,13 +7,16 @@ interface Props {
   service: ChatService
   /** 進入畫面時就要顯示的提示(例如「你上次的代號現在有人在用」) */
   initialError?: string
+  /** 一般說明(不是錯誤),例如「你已離開聊天室」。開始輸入就會消失 */
+  initialInfo?: string
   /** 回傳錯誤訊息;成功時回傳 null(畫面會被換掉) */
   onJoin: (nickname: string) => Promise<string | null>
 }
 
-export function JoinScreen({ service, initialError = '', onJoin }: Props) {
+export function JoinScreen({ service, initialError = '', initialInfo = '', onJoin }: Props) {
   const [value, setValue] = useState('')
   const [error, setError] = useState(initialError)
+  const [info, setInfo] = useState(initialInfo)
   const [busy, setBusy] = useState(false)
 
   const n = charCount(value.trim())
@@ -57,6 +60,7 @@ export function JoinScreen({ service, initialError = '', onJoin }: Props) {
             onChange={(e) => {
               setValue(e.target.value)
               setError('')
+              setInfo('')
             }}
             aria-describedby="nickname-error"
             aria-invalid={error !== '' || tooLong}
@@ -65,8 +69,12 @@ export function JoinScreen({ service, initialError = '', onJoin }: Props) {
             {n}/{NICKNAME_MAX}
           </span>
         </div>
-        <div className="err" id="nickname-error" role="alert">
-          {error || (tooLong ? NICKNAME_LENGTH_MESSAGE : '')}
+        <div
+          className={`err${!error && !tooLong && info ? ' info' : ''}`}
+          id="nickname-error"
+          role="alert"
+        >
+          {error || (tooLong ? NICKNAME_LENGTH_MESSAGE : info)}
         </div>
         <div>
           <button type="submit" className="btn primary" disabled={!canSubmit}>

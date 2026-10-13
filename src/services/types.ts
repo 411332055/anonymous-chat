@@ -26,7 +26,7 @@ export type JoinResult =
 
 export type SendResult =
   | { ok: true }
-  | { ok: false; reason: 'too_long' | 'empty' | 'rate_limited' | 'network' }
+  | { ok: false; reason: 'too_long' | 'empty' | 'rate_limited' | 'nickname_not_allowed' | 'network' }
 
 /** 資料來源發出的事件,以及各自帶的資料 */
 export interface ChatEvents {

@@ -127,6 +127,8 @@ export class SupabaseChatService implements ChatService {
   private visible = new Map<string, User>()
   /** 每個「畫面上還顯示在線、但已經從在線資料消失」的人,是從什麼時候開始消失的 */
   private missingSince = new Map<string, number>()
+  /** 對方已經主動說「我離開了」:記下他當時的心跳。伺服器還留著的那筆舊資料(心跳沒變)不再算在線 */
+  private departed = new Map<string, number | null>()
   // 用 Web Worker 計時,在背景分頁也不會被瀏覽器放慢
   // 連線斷掉時自動重新加入(Supabase 有時會把連線乾淨地關掉,而且不會自己重連)
   /** 使用者目前「想要」用的代號;有值就代表使用者還在聊天室裡,斷線時要自動重連 */
@@ -207,6 +209,12 @@ export class SupabaseChatService implements ChatService {
       })
       .on('presence', { event: 'join' }, () => this.reconcile())
       .on('presence', { event: 'leave' }, () => this.reconcile())
+      // 對方按了「換代號」或關閉頁面,主動廣播「我離開了」:立刻移除,不用等伺服器通知和緩衝時間
+      .on('broadcast', { event: 'bye' }, (msg) => {
+        const id = (msg.payload as { clientId?: unknown } | undefined)?.clientId
+        if (!this.me || typeof id !== 'string' || id === this.clientId || !inRange(id, 1, CLIENT_ID_MAX)) return
+        this.markDeparted(id)
+      })
       .on('broadcast', { event: 'typing' }, (msg) => {
         const t = parseMeta({ ...(msg.payload as object), joinedAt: 0 })
         if (!this.me || !t || t.clientId === this.clientId) return
@@ -278,6 +286,7 @@ export class SupabaseChatService implements ChatService {
     if (error) {
       // 資料庫端的規則擋下來的:送太快(自訂錯誤 rate_limited)、超過長度(check constraint)
       if (error.message?.includes('rate_limited')) return { ok: false, reason: 'rate_limited' }
+      if (error.message?.includes('nickname_not_allowed')) return { ok: false, reason: 'nickname_not_allowed' }
       if (error.code === '23514') return { ok: false, reason: 'too_long' }
       return { ok: false, reason: 'network' }
     }
@@ -298,6 +307,7 @@ export class SupabaseChatService implements ChatService {
   }
 
   async leave(): Promise<void> {
+    this.sayBye()
     this.desiredNickname = null
     this.clearRejoin()
     await this.teardown()
@@ -467,8 +477,12 @@ export class SupabaseChatService implements ChatService {
   }
 
   /** 「別人」之中:仍然活著的,以及「伺服器目前還記得」的人(後者包含心跳已停止的) */
-  private othersStatus(): { alive: User[]; presentIds: Set<string> } {
-    const others = this.presenceEntries().filter((e) => e.user.clientId !== this.clientId)
+  private othersStatus(): { alive: User[]; presentIds: Set<string>; rawIds: Set<string> } {
+    const all = this.presenceEntries().filter((e) => e.user.clientId !== this.clientId)
+    // 已經主動說「我離開了」、而且伺服器留著的還是他離開前那一筆舊資料:不算在線
+    const others = all.filter(
+      (e) => !(this.departed.has(e.user.clientId) && this.departed.get(e.user.clientId) === e.beat),
+    )
     const aliveIds = this.liveness.update(
       others.map((e) => ({ clientId: e.user.clientId, beat: e.beat })),
       Date.now(),
@@ -476,6 +490,7 @@ export class SupabaseChatService implements ChatService {
     return {
       alive: others.filter((e) => aliveIds.has(e.user.clientId)).map((e) => e.user),
       presentIds: new Set(others.map((e) => e.user.clientId)),
+      rawIds: new Set(all.map((e) => e.user.clientId)),
     }
   }
 
@@ -492,6 +507,7 @@ export class SupabaseChatService implements ChatService {
     for (const [id, u] of alive) {
       if (this.visible.has(id)) continue
       this.visible.set(id, u)
+      this.departed.delete(id)
       changed = true
       this.emit('user:joined', u)
     }
@@ -503,7 +519,7 @@ export class SupabaseChatService implements ChatService {
       }
       // 伺服器已經沒有這個人的資料(通知離開):先等一下,可能只是對方的連線短暫重連。
       // 伺服器還記得他、但心跳停了(已經等過逾時):不用再等。
-      if (!status.presentIds.has(id)) {
+      if (!status.presentIds.has(id) && !this.departed.has(id)) {
         const since = this.missingSince.get(id) ?? now
         this.missingSince.set(id, since)
         if (now - since < LEAVE_GRACE_MS) continue
@@ -514,7 +530,27 @@ export class SupabaseChatService implements ChatService {
       this.typing.clear(id)
       this.emit('user:left', u)
     }
+    // 伺服器已經完全忘記的人,不用再記著他「已離開」
+    for (const id of [...this.departed.keys()]) if (!status.rawIds.has(id)) this.departed.delete(id)
     if (changed) this.emit('presence:sync', this.onlineUsers())
+  }
+
+  /** 收到「某人主動離開」的廣播:記下來並立刻重新核對 */
+  private markDeparted(id: string): void {
+    const entry = this.presenceEntries().find((e) => e.user.clientId === id)
+    this.departed.set(id, entry?.beat ?? null)
+    this.reconcile()
+  }
+
+  /** 告訴其他人「我要離開了」(盡力而為,不等結果) */
+  private sayBye(): void {
+    const channel = this.channel
+    if (!channel || !this.me) return
+    try {
+      void channel.send({ type: 'broadcast', event: 'bye', payload: { clientId: this.clientId } })
+    } catch {
+      /* 送不出去就算了,對方還有心跳和伺服器通知可以發現 */
+    }
   }
 
   private onlineUsers(): User[] {
@@ -549,6 +585,7 @@ export class SupabaseChatService implements ChatService {
   private leaveQuietly(): void {
     const channel = this.channel
     if (!channel || !this.me) return
+    this.sayBye()
     try {
       void channel.untrack()
       void this.db.removeChannel(channel)
@@ -588,6 +625,7 @@ export class SupabaseChatService implements ChatService {
     this.status = 'connecting'
     this.visible.clear()
     this.missingSince.clear()
+    this.departed.clear()
     this.stopTimers()
     this.typing.reset()
     if (!channel) return

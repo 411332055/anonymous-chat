@@ -6,7 +6,21 @@ interface Props {
   text: string
   self: boolean
   /** 只有自己的訊息會有 */
-  state?: { status: 'sending' | 'failed'; onRetry: () => void }
+  state?: { status: 'sending' | 'failed'; reason?: string; onRetry: () => void }
+}
+
+/** 傳送失敗時顯示的說明:依原因給具體一點的提示 */
+function failureText(reason?: string): string {
+  switch (reason) {
+    case 'rate_limited':
+      return '送太快了,請稍後重送'
+    case 'nickname_not_allowed':
+      return '這個代號不允許發言,請換一個代號'
+    case 'too_long':
+      return '內容太長'
+    default:
+      return '傳送失敗'
+  }
 }
 
 export function MessageItem({ nickname, time, text, self, state }: Props) {
@@ -21,10 +35,15 @@ export function MessageItem({ nickname, time, text, self, state }: Props) {
         {state?.status === 'sending' && <div className="state">傳送中…</div>}
         {state?.status === 'failed' && (
           <div className="state">
-            傳送失敗{' '}
-            <button type="button" onClick={state.onRetry}>
-              重送
-            </button>
+            {failureText(state.reason)}
+            {state.reason !== 'nickname_not_allowed' && (
+              <>
+                {' '}
+                <button type="button" onClick={state.onRetry}>
+                  重送
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>

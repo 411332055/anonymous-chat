@@ -9,7 +9,7 @@ import type { JoinResult } from './services/types'
 
 type Stage =
   | { kind: 'boot' }
-  | { kind: 'join'; notice?: string }
+  | { kind: 'join'; notice?: string; info?: string }
   | { kind: 'chat'; nickname: string; initial: ChatInitial }
 
 const NETWORK_MESSAGE = '連不上聊天室,請檢查網路後再試一次。'
@@ -63,12 +63,19 @@ export default function App() {
   const handleLeave = async () => {
     await chatService.leave()
     clearNickname()
-    setStage({ kind: 'join' })
+    setStage({ kind: 'join', info: '你已離開聊天室。想再進來,輸入一個代號就可以。' })
   }
 
   if (stage.kind === 'boot') return <div className="boot" aria-busy="true" />
   if (stage.kind === 'join') {
-    return <JoinScreen service={chatService} initialError={stage.notice} onJoin={handleJoin} />
+    return (
+      <JoinScreen
+        service={chatService}
+        initialError={stage.notice}
+        initialInfo={stage.info}
+        onJoin={handleJoin}
+      />
+    )
   }
   return (
     <ChatScreen

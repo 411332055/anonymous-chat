@@ -12,6 +12,8 @@ export interface PendingMessage {
   localId: number
   text: string
   status: 'sending' | 'failed'
+  /** 失敗的原因(給畫面顯示更具體的說明) */
+  reason?: string
   createdAt: number
 }
 
@@ -69,7 +71,9 @@ export function useChat(service: ChatService, initial: ChatInitial) {
     async (localId: number, text: string) => {
       const result = await service.send(text)
       if (!result.ok) {
-        setPending((prev) => prev.map((p) => (p.localId === localId ? { ...p, status: 'failed' } : p)))
+        setPending((prev) =>
+          prev.map((p) => (p.localId === localId ? { ...p, status: 'failed', reason: result.reason } : p)),
+        )
         return
       }
       setTimeout(() => setPending((prev) => prev.filter((p) => p.localId !== localId)), PENDING_TIMEOUT_MS)
@@ -88,7 +92,7 @@ export function useChat(service: ChatService, initial: ChatInitial) {
 
   const retry = useCallback(
     (localId: number, text: string) => {
-      setPending((prev) => prev.map((p) => (p.localId === localId ? { ...p, status: 'sending' } : p)))
+      setPending((prev) => prev.map((p) => (p.localId === localId ? { ...p, status: 'sending', reason: undefined } : p)))
       void attempt(localId, text)
     },
     [attempt],

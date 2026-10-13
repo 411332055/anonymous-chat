@@ -83,7 +83,7 @@ export function MessageList({ items, pending, meClientId, meNickname, onRetry }:
             time={p.createdAt}
             text={p.text}
             self
-            state={{ status: p.status, onRetry: () => onRetry(p.localId, p.text) }}
+            state={{ status: p.status, reason: p.reason, onRetry: () => onRetry(p.localId, p.text) }}
           />
         ))}
       </div>
