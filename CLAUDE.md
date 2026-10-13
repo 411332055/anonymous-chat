@@ -5,5 +5,5 @@
 ## 規則
 
 - **開始任何工作前,先讀 `docs/architecture.md`。**需求在 `docs/requirements.md`。
-- **目前在「階段二」**:前端已完成並上線,正在接上 Supabase。畫面層(`screens/`、`components/`、`hooks/`)不可以直接引用 Supabase,只能透過 `services/`。Supabase 的設定步驟見 `supabase/setup.md`,**不使用 Supabase CLI**。
+- **目前在「階段二」**:前端已完成,並已接上 Supabase(多人即時聊天已上線)。畫面層(`screens/`、`components/`、`hooks/`)不可以直接引用 Supabase,只能透過 `services/`。Supabase 的設定步驟見 `supabase/setup.md`,**不使用 Supabase CLI**。
 - **不可以把金鑰檔案 commit 進 git**:`.env`、`.env.local` 等 `.env*` 檔案都不能進 git(只有 `.env.example` 可以,且值必須是空的)。service_role / secret key 和資料庫密碼不得寫進任何專案檔案。commit 前先跑 `git status` 確認。
