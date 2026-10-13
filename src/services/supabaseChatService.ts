@@ -1,6 +1,7 @@
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js'
 import { getTabClientId } from '../lib/clientId'
-import { charCount, MESSAGE_MAX } from '../lib/validate'
+import { charCount, MESSAGE_MAX, NICKNAME_MAX } from '../lib/validate'
+import { PresenceLiveness } from './presenceLiveness'
 import { TypingTracker } from './typingTracker'
 import type {
   ChatEvents,
@@ -25,11 +26,20 @@ const SUBSCRIBE_TIMEOUT_MS = 10_000
 const PRESENCE_WAIT_MS = 1500
 /** 第一次連不上時,等多久再重試一次 */
 const RETRY_DELAY_MS = 1200
+/** 每隔多久更新一次自己的「心跳」(讓別人知道我還在線上) */
+const HEARTBEAT_MS = 8_000
+/** 別人超過這麼久沒有更新心跳,就視為已離開(即使伺服器沒通知) */
+const LIVENESS_TTL_MS = 30_000
+/** 每隔多久重新核對一次「誰還在線上」 */
+const RECONCILE_MS = 3_000
+const CLIENT_ID_MAX = 64
 
 interface PresenceMeta {
   nickname: string
   clientId: string
   joinedAt: number
+  /** 心跳:每次更新都會變的數字,別人靠它判斷我還在不在 */
+  beat?: number
 }
 
 /** messages 資料表的一列 */
@@ -39,6 +49,35 @@ interface Row {
   client_id: string
   text: string
   sent_at: string
+}
+
+const inRange = (s: string, min: number, max: number) => {
+  const n = charCount(s)
+  return n >= min && n <= max
+}
+
+/** 收到別人推來的資料時,先檢查格式與長度,不合格就丟掉(不顯示、不處理) */
+function parseRow(raw: unknown): Row | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const idOk = (typeof r.id === 'number' && Number.isFinite(r.id)) || (typeof r.id === 'string' && r.id !== '')
+  if (!idOk) return null
+  if (typeof r.nickname !== 'string' || !inRange(r.nickname, 1, NICKNAME_MAX)) return null
+  if (typeof r.client_id !== 'string' || !inRange(r.client_id, 1, CLIENT_ID_MAX)) return null
+  if (typeof r.text !== 'string' || !inRange(r.text, 1, MESSAGE_MAX)) return null
+  if (typeof r.sent_at !== 'string' || Number.isNaN(Date.parse(r.sent_at))) return null
+  return { id: r.id as number | string, nickname: r.nickname, client_id: r.client_id, text: r.text, sent_at: r.sent_at }
+}
+
+/** 同上,檢查別人登記的在線資料 */
+function parseMeta(raw: unknown): PresenceMeta | null {
+  if (!raw || typeof raw !== 'object') return null
+  const m = raw as Record<string, unknown>
+  if (typeof m.nickname !== 'string' || !inRange(m.nickname, 1, NICKNAME_MAX)) return null
+  if (typeof m.clientId !== 'string' || !inRange(m.clientId, 1, CLIENT_ID_MAX)) return null
+  if (typeof m.joinedAt !== 'number' || !Number.isFinite(m.joinedAt)) return null
+  const beat = typeof m.beat === 'number' && Number.isFinite(m.beat) ? m.beat : undefined
+  return { nickname: m.nickname, clientId: m.clientId, joinedAt: m.joinedAt, beat }
 }
 
 const toMessage = (r: Row): Message => ({
@@ -68,6 +107,13 @@ export class SupabaseChatService implements ChatService {
   private typing = new TypingTracker((users) => this.emit('typing:update', users))
   private lastTypingSent = 0
 
+  // 「誰在線上」:伺服器通知 + 自己核對心跳。兩者合起來,名單才不會卡住已離開的人。
+  private liveness = new PresenceLiveness(LIVENESS_TTL_MS)
+  /** 目前畫面上認為在線的「別人」(用來產生「進來了/離開了」提示,避免重複) */
+  private visible = new Map<string, User>()
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private reconcileTimer: ReturnType<typeof setInterval> | null = null
+
   constructor(url: string, anonKey: string) {
     // 這個專案不用登入,所以不需要 Supabase 的登入狀態儲存
     this.db = createClient(url, anonKey, {
@@ -79,6 +125,14 @@ export class SupabaseChatService implements ChatService {
     window.addEventListener('online', () => void this.recover())
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') void this.recover()
+    })
+
+    // 關掉分頁、重新整理、換網址:不等伺服器發現,主動告訴大家「我離開了」(盡力而為)
+    window.addEventListener('pagehide', () => this.leaveQuietly())
+    window.addEventListener('beforeunload', () => this.leaveQuietly())
+    // 從瀏覽器的「上一頁快取」還原的頁面,連線早就沒了,重新載入最單純
+    window.addEventListener('pageshow', (e) => {
+      if (e.persisted) location.reload()
     })
   }
 
@@ -114,28 +168,19 @@ export class SupabaseChatService implements ChatService {
 
     channel
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: TABLE }, (p) =>
-        this.onInsert(p.new as Row),
+        this.onInsert(p.new),
       )
+      // 在線狀態有任何變化(同步、加入、離開):統一重新核對「誰在線上」,
+      // 由 reconcile 負責比對差異、產生「進來了/離開了」提示與更新名單
       .on('presence', { event: 'sync' }, () => {
         firstSync()
-        if (this.me) this.emit('presence:sync', this.onlineUsers())
+        this.reconcile()
       })
-      .on('presence', { event: 'join' }, (p) => {
-        for (const m of p.newPresences as unknown as PresenceMeta[]) {
-          if (this.me && m.clientId !== this.clientId) this.emit('user:joined', this.toUser(m))
-        }
-      })
-      .on('presence', { event: 'leave' }, (p) => {
-        for (const m of p.leftPresences as unknown as PresenceMeta[]) {
-          if (this.me && m.clientId !== this.clientId) {
-            this.typing.clear(m.clientId)
-            this.emit('user:left', this.toUser(m))
-          }
-        }
-      })
+      .on('presence', { event: 'join' }, () => this.reconcile())
+      .on('presence', { event: 'leave' }, () => this.reconcile())
       .on('broadcast', { event: 'typing' }, (msg) => {
-        const t = msg.payload as { nickname?: string; clientId?: string } | undefined
-        if (!this.me || !t?.nickname || !t.clientId || t.clientId === this.clientId) return
+        const t = parseMeta({ ...(msg.payload as object), joinedAt: 0 })
+        if (!this.me || !t || t.clientId === this.clientId) return
         this.typing.touch({ nickname: t.nickname, clientId: t.clientId, joinedAt: 0 })
       })
 
@@ -161,8 +206,8 @@ export class SupabaseChatService implements ChatService {
     // 等「目前在線名單」送過來,再判斷代號有沒有人用
     await Promise.race([synced, sleep(PRESENCE_WAIT_MS)])
     const lower = nickname.toLowerCase()
-    const taken = this.presenceUsers().some(
-      (u) => u.clientId !== this.clientId && u.nickname.toLowerCase() === lower,
+    const taken = this.presenceEntries().some(
+      (e) => e.user.clientId !== this.clientId && e.user.nickname.toLowerCase() === lower,
     )
     if (taken) {
       await this.teardown()
@@ -171,6 +216,8 @@ export class SupabaseChatService implements ChatService {
 
     const me: User = { nickname, clientId: this.clientId, joinedAt: Date.now() }
     this.me = me
+    // 先把「現在已經在線的人」記成基準,之後才只對「變化」產生進出提示
+    this.visible = new Map(this.aliveOthers().map((u) => [u.clientId, u]))
     const tracked = await channel.track(this.toMeta(me))
     if (tracked !== 'ok') {
       await this.teardown()
@@ -181,6 +228,7 @@ export class SupabaseChatService implements ChatService {
       const recent = await this.fetchRecent(BACKFILL_LIMIT)
       this.lastId = recent.reduce((max, m) => Math.max(max, Number(m.id)), 0)
       this.setStatus('connected')
+      this.startTimers()
       return { ok: true, recent, online: this.onlineUsers() }
     } catch {
       await this.teardown()
@@ -226,7 +274,9 @@ export class SupabaseChatService implements ChatService {
 
   /* ---------------- Realtime 事件 ---------------- */
 
-  private onInsert(row: Row): void {
+  private onInsert(raw: unknown): void {
+    const row = parseRow(raw)
+    if (!row) return // 格式不對的資料直接丟掉
     const n = Number(row.id)
     if (n > this.lastId) this.lastId = n
     this.typing.clear(row.client_id) // 對方送出訊息了,不再「正在輸入」
@@ -255,6 +305,7 @@ export class SupabaseChatService implements ChatService {
     if (!this.me || !this.channel) return
     const ok = await this.catchUp()
     if (ok && this.channel.state === 'joined') {
+      this.reconcile()
       this.emit('presence:sync', this.onlineUsers())
       this.setStatus('connected')
     }
@@ -270,7 +321,7 @@ export class SupabaseChatService implements ChatService {
     if (error || !data) return false
 
     // 漏太多就只補最新的,並提示中間有缺漏
-    const rows = data as Row[]
+    const rows = data as unknown[]
     const gap = rows.length > BACKFILL_LIMIT
     const missed = (gap ? rows.slice(0, BACKFILL_LIMIT) : rows).reverse()
     if (gap) this.emit('messages:gap', undefined)
@@ -287,23 +338,97 @@ export class SupabaseChatService implements ChatService {
       .order('id', { ascending: false })
       .limit(limit)
     if (error) throw error
-    return (data as Row[]).reverse().map(toMessage)
+    return (data as unknown[])
+      .reverse()
+      .map(parseRow)
+      .filter((r): r is Row => r !== null)
+      .map(toMessage)
   }
 
-  /** 目前頻道上所有人(含自己以外的),依 clientId 去重 */
-  private presenceUsers(): User[] {
-    const byId = new Map<string, User>()
-    const state = this.channel?.presenceState<PresenceMeta>() ?? {}
+  /** 目前頻道上看得到的所有人(包含自己),依 clientId 去重,格式不對的丟掉 */
+  private presenceEntries(): Array<{ user: User; beat: number | null }> {
+    const byId = new Map<string, { user: User; beat: number | null }>()
+    const state = this.channel?.presenceState() ?? {}
     for (const metas of Object.values(state)) {
-      for (const m of metas) if (!byId.has(m.clientId)) byId.set(m.clientId, this.toUser(m))
+      for (const raw of metas) {
+        const m = parseMeta(raw)
+        if (!m) continue
+        const prev = byId.get(m.clientId)
+        // 同一個人若有多筆(重新整理時舊連線還沒被清掉),留心跳最新的那筆
+        if (!prev || (m.beat ?? -1) > (prev.beat ?? -1)) {
+          byId.set(m.clientId, { user: this.toUser(m), beat: m.beat ?? null })
+        }
+      }
     }
     return [...byId.values()]
   }
 
+  /** 「別人」之中仍然活著的(伺服器還沒通知離開、但心跳停了的人會被排除) */
+  private aliveOthers(): User[] {
+    const others = this.presenceEntries().filter((e) => e.user.clientId !== this.clientId)
+    const alive = this.liveness.update(
+      others.map((e) => ({ clientId: e.user.clientId, beat: e.beat })),
+      Date.now(),
+    )
+    return others.filter((e) => alive.has(e.user.clientId)).map((e) => e.user)
+  }
+
+  /** 比對「畫面上認為在線的人」和「實際還活著的人」:有差異就發出進出提示並更新名單 */
+  private reconcile(): void {
+    if (!this.me) return
+    const alive = new Map(this.aliveOthers().map((u) => [u.clientId, u]))
+    let changed = false
+    for (const [id, u] of alive) {
+      if (this.visible.has(id)) continue
+      this.visible.set(id, u)
+      changed = true
+      this.emit('user:joined', u)
+    }
+    for (const [id, u] of [...this.visible]) {
+      if (alive.has(id)) continue
+      this.visible.delete(id)
+      changed = true
+      this.typing.clear(id)
+      this.emit('user:left', u)
+    }
+    if (changed) this.emit('presence:sync', this.onlineUsers())
+  }
+
   private onlineUsers(): User[] {
-    const byId = new Map(this.presenceUsers().map((u) => [u.clientId, u]))
-    if (this.me) byId.set(this.me.clientId, this.me)
-    return [...byId.values()].sort((a, b) => a.joinedAt - b.joinedAt)
+    const all = [...this.visible.values()]
+    if (this.me) all.push(this.me)
+    return all.sort((a, b) => a.joinedAt - b.joinedAt)
+  }
+
+  private startTimers(): void {
+    this.stopTimers()
+    this.heartbeatTimer = setInterval(() => this.beat(), HEARTBEAT_MS)
+    this.reconcileTimer = setInterval(() => this.reconcile(), RECONCILE_MS)
+  }
+
+  private stopTimers(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer)
+    this.heartbeatTimer = null
+    this.reconcileTimer = null
+  }
+
+  /** 更新自己的心跳,讓別人知道我還在線上 */
+  private beat(): void {
+    if (!this.me || !this.channel || this.status !== 'connected') return
+    void this.channel.track(this.toMeta(this.me))
+  }
+
+  /** 頁面要關閉了:盡力通知大家我離開(不等結果)。就算沒送到,對方也會因為心跳停止而把我移出名單。 */
+  private leaveQuietly(): void {
+    const channel = this.channel
+    if (!channel || !this.me) return
+    try {
+      void channel.untrack()
+      void this.db.removeChannel(channel)
+    } catch {
+      /* 頁面都要關了,失敗就算了 */
+    }
   }
 
   private toUser = (m: PresenceMeta): User => ({
@@ -316,6 +441,7 @@ export class SupabaseChatService implements ChatService {
     nickname: u.nickname,
     clientId: u.clientId,
     joinedAt: u.joinedAt,
+    beat: Date.now(),
   })
 
   private setStatus(next: ConnectionStatus): void {
@@ -334,6 +460,8 @@ export class SupabaseChatService implements ChatService {
     this.channel = null
     this.me = null
     this.status = 'connecting'
+    this.visible.clear()
+    this.stopTimers()
     this.typing.reset()
     if (!channel) return
     try {

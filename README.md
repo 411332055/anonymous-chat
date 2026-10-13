@@ -33,6 +33,7 @@ npm run preview   預覽建置後的網站
 | A 只在自己的畫面上 | 分頁標題顯示未讀數:`(3) 匿名聊天室` | `src/hooks/useUnreadTitle.ts` |
 | B 和所有人即時同步 | 「○○ 正在輸入…」 | `src/services/typingTracker.ts`、`src/components/TypingIndicator.tsx` |
 | C 伺服器端強制的規則 | 資料庫端的送出頻率限制與髒話過濾(Postgres 觸發器) | `supabase/server_rules.sql` |
+| A 只在自己的畫面上(同級) | 前端髒話過濾、送出頻率提示、傳送中/傳送失敗與重送 | `src/lib/profanity.ts`、`src/components/MessageInput.tsx`、`src/hooks/useChat.ts` |
 
 詳細說明、已知限制與驗證項目見 [docs/architecture.md](docs/architecture.md) 最後的〈新增功能〉一節。
 
