@@ -208,6 +208,7 @@ flowchart TB
 | `user:joined` | 資料來源 | 一個 User | 顯示「○○ 進來了」 |
 | `user:left` | 資料來源 | 一個 User | 顯示「○○ 離開了」 |
 | `connection:status` | 資料來源 | 連線狀態 | 顯示或隱藏頂部的重新連線橫幅 |
+| `messages:gap` | 資料來源 | (無) | 斷線太久、補不回全部訊息時,在訊息串插入「中間有部分訊息未顯示」 |
 
 ### 5.3 動作(畫面層呼叫資料來源)
 
@@ -503,8 +504,11 @@ anonymous-chat/
 │   │   ├── OnlineList.tsx
 │   │   ├── MessageInput.tsx
 │   │   ├── ConnectionBanner.tsx
-│   │   ├── NewMessageButton.tsx
+│   │   ├── DemoBanner.tsx         示範模式橫幅(含測試用的「模擬斷線」按鈕)
 │   │   └── ChangeNicknameDialog.tsx
+│   │   (「有新訊息」按鈕直接寫在 MessageList.tsx 裡,因為它和捲動位置綁在一起)
+│   ├── hooks/
+│   │   └── useChat.ts             聊天室的狀態:訊息、在線名單、連線狀態、傳送中的訊息
 │   ├── services/              ← 資料來源層(畫面層禁止跳過這裡)
 │   │   ├── types.ts               第 5 節的資料格式與 ChatService 介面
 │   │   ├── index.ts               依設定選擇用 mock 或 supabase
@@ -516,6 +520,7 @@ anonymous-chat/
 │   │   ├── profanity.ts           髒話過濾邏輯
 │   │   ├── badWords.ts            髒話清單(獨立成檔,方便維護)
 │   │   ├── clientId.ts            產生與讀取 clientId
+│   │   ├── nickColor.ts           代號顏色的分配、時間格式
 │   │   └── storage.ts             記住代號(localStorage)
 │   └── styles/                ← 外觀(由 /design、/frontend-design 產出)
 ├── supabase/
