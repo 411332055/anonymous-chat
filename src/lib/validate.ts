@@ -1,6 +1,6 @@
 import { hasProfanity } from './profanity'
 
-export const NICKNAME_MAX = 12
+export const NICKNAME_MAX = 24
 export const MESSAGE_MAX = 200
 export const MESSAGE_MAX_LINES = 10
 /** 字數達到這個數字才顯示計數,避免平常畫面太吵 */
@@ -16,7 +16,7 @@ export function normalizeNickname(raw: string): string {
   return raw.replace(INVISIBLE, '').replace(/\s+/g, ' ').trim()
 }
 
-export const NICKNAME_LENGTH_MESSAGE = '代號要 1 到 12 個字,不能只有空白。'
+export const NICKNAME_LENGTH_MESSAGE = '代號要 1 到 24 個字,不能只有空白。'
 export const NICKNAME_PROFANITY_MESSAGE = '這個代號含有不允許的字詞,請換一個。'
 
 export type NicknameCheck = { ok: true; value: string } | { ok: false; message: string }

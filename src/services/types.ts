@@ -26,7 +26,7 @@ export type JoinResult =
 
 export type SendResult =
   | { ok: true }
-  | { ok: false; reason: 'too_long' | 'empty' | 'network' }
+  | { ok: false; reason: 'too_long' | 'empty' | 'rate_limited' | 'network' }
 
 /** 資料來源發出的事件,以及各自帶的資料 */
 export interface ChatEvents {
@@ -37,6 +37,8 @@ export interface ChatEvents {
   'connection:status': ConnectionStatus
   /** 斷線太久、中間有訊息沒補回來 */
   'messages:gap': void
+  /** 目前有哪些「別人」正在輸入(不含自己)。每次有人開始或停止輸入就會重新發一次完整名單 */
+  'typing:update': User[]
 }
 
 export interface ChatService {
@@ -44,9 +46,11 @@ export interface ChatService {
   readonly isDemo: boolean
   readonly clientId: string
 
+  /** 進入聊天室。成功時一併回傳最近的訊息與目前在線名單 */
   join(nickname: string): Promise<JoinResult>
-  loadRecent(limit: number): Promise<Message[]>
   send(text: string): Promise<SendResult>
+  /** 告訴其他人「我正在輸入」。畫面在使用者打字時呼叫,資料來源自己負責節流 */
+  notifyTyping(): void
   leave(): Promise<void>
   /** 訂閱事件,回傳取消訂閱的函式 */
   on<K extends keyof ChatEvents>(

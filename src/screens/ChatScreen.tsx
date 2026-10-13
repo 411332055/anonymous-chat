@@ -5,7 +5,9 @@ import { DemoBanner } from '../components/DemoBanner'
 import { MessageInput } from '../components/MessageInput'
 import { MessageList } from '../components/MessageList'
 import { OnlineList } from '../components/OnlineList'
+import { TypingIndicator } from '../components/TypingIndicator'
 import { useChat, type ChatInitial } from '../hooks/useChat'
+import { useUnreadTitle } from '../hooks/useUnreadTitle'
 import type { ChatService } from '../services/types'
 
 const ROOM_NAME = '#大廳'
@@ -19,6 +21,7 @@ interface Props {
 
 export function ChatScreen({ service, nickname, initial, onLeave }: Props) {
   const chat = useChat(service, initial)
+  useUnreadTitle(chat.items, chat.clientId)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
 
@@ -70,7 +73,8 @@ export function ChatScreen({ service, nickname, initial, onLeave }: Props) {
             meNickname={nickname}
             onRetry={chat.retry}
           />
-          <MessageInput disconnected={disconnected} onSend={chat.send} />
+          <TypingIndicator users={chat.typing} />
+          <MessageInput disconnected={disconnected} onSend={chat.send} onTyping={chat.notifyTyping} />
         </section>
         <OnlineList id="online-panel" users={chat.online} meClientId={chat.clientId} />
       </div>

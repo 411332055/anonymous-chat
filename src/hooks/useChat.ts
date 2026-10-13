@@ -31,6 +31,7 @@ export function useChat(service: ChatService, initial: ChatInitial) {
   const [online, setOnline] = useState<User[]>(initial.online)
   const [status, setStatus] = useState<ConnectionStatus>('connected')
   const [pending, setPending] = useState<PendingMessage[]>([])
+  const [typing, setTyping] = useState<User[]>([])
 
   const seen = useRef(new Set(initial.recent.map((m) => m.id)))
   const counter = useRef(0)
@@ -58,6 +59,7 @@ export function useChat(service: ChatService, initial: ChatInitial) {
         if (u.clientId !== clientId) push({ kind: 'notice', key: `n${counter.current++}`, text: `${u.nickname} 離開了` })
       }),
       service.on('connection:status', (s) => setStatus(s)),
+      service.on('typing:update', (users) => setTyping(users)),
       service.on('messages:gap', () => push({ kind: 'gap', key: `g${counter.current++}` })),
     ]
     return () => offs.forEach((off) => off())
@@ -92,5 +94,7 @@ export function useChat(service: ChatService, initial: ChatInitial) {
     [attempt],
   )
 
-  return { items, online, status, pending, send, retry, clientId }
+  const notifyTyping = useCallback(() => service.notifyTyping(), [service])
+
+  return { items, online, status, pending, typing, send, retry, notifyTyping, clientId }
 }

@@ -52,7 +52,7 @@ export function JoinScreen({ service, initialError = '', onJoin }: Props) {
             autoComplete="off"
             autoCapitalize="off"
             spellCheck={false}
-            placeholder="1 到 12 個字"
+            placeholder="1 到 24 個字"
             value={value}
             onChange={(e) => {
               setValue(e.target.value)

@@ -102,7 +102,8 @@ button, input, textarea { font: inherit; color: inherit; }
 .topbar .online-n { color: var(--dim); }
 .topbar .spacer { flex: 1; }
 .topbar .me { display: flex; align-items: center; gap: 14px; color: var(--dim); }
-.topbar .me b { color: var(--ice); font-weight: 600; }
+.topbar .me b { color: var(--ice); font-weight: 600; overflow-wrap: anywhere; }
+.topbar .me > span { min-width: 0; overflow-wrap: anywhere; }
 .online-toggle { display: none; }
 
 .conn {
@@ -149,6 +150,14 @@ button, input, textarea { font: inherit; color: inherit; }
   font-weight: 600; cursor: pointer; border-radius: 2px;
 }
 
+/* 「○○ 正在輸入…」:永遠保留一行高度,有人輸入時才出現文字,避免畫面跳動 */
+.typing { min-height: 22px; padding: 2px 16px 0; font-size: 12px; color: var(--dim); background: var(--bg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.typing .dots::after { content: '…'; }
+@media (prefers-reduced-motion: no-preference) {
+  .typing .dots { animation: typing-pulse 1.2s ease-in-out infinite; }
+  @keyframes typing-pulse { 50% { opacity: 0.35; } }
+}
+
 .composer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 16px 12px; }
 .composer .box { display: flex; gap: 10px; align-items: flex-end; }
 .composer .field {
@@ -188,7 +197,7 @@ button, input, textarea { font: inherit; color: inherit; }
 .dialog p { margin: 0 0 20px; color: var(--dim); }
 .dialog .acts { display: flex; justify-content: flex-end; gap: 10px; }
 
-/* 觸控裝置(手機):Enter 是換行,不顯示「Enter 送出」的提示 */
+/* 觸控裝置(手機)沒有 Shift 鍵,不顯示「Enter 送出,Shift+Enter 換行」的提示 */
 @media (pointer: coarse) { .composer .hint-d { display: none; } }
 
 /* ---------- 手機版面 ---------- */
@@ -203,6 +212,7 @@ button, input, textarea { font: inherit; color: inherit; }
   .list { padding: 12px; }
   .msg { max-width: 88%; }
   .composer { padding: 8px 12px 10px; }
+  .typing { padding: 2px 12px 0; }
 
   /* 在線名單改成從右側滑出的抽屜 */
   .side {

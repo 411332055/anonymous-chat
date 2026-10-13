@@ -19,13 +19,8 @@ function getOrCreate(storage: Storage, key: string): string {
   }
 }
 
-/** 整個瀏覽器共用一個(關掉分頁也不變)。正式的 Supabase 版本用這個。 */
-export function getBrowserClientId(): string {
-  return getOrCreate(localStorage, 'anonymous-chat:client-id')
-}
-
-/** 每個分頁各自一個(重新整理不變)。示範模式用這個,
- *  這樣同一個瀏覽器開兩個分頁,才能當成兩個不同的人來測試。 */
+/** 每個分頁各自一個(重新整理不變,關掉分頁就換新的)。
+ *  示範模式與 Supabase 都用這個:同一個瀏覽器開多個分頁,才會被當成不同的人。 */
 export function getTabClientId(): string {
   return getOrCreate(sessionStorage, 'anonymous-chat:tab-client-id')
 }

@@ -1,6 +1,7 @@
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js'
 import { getTabClientId } from '../lib/clientId'
 import { charCount, MESSAGE_MAX } from '../lib/validate'
+import { TypingTracker } from './typingTracker'
 import type {
   ChatEvents,
   ChatService,
@@ -63,6 +64,10 @@ export class SupabaseChatService implements ChatService {
   private lastId = 0
   private listeners = new Map<string, Set<(payload: never) => void>>()
 
+  // 「正在輸入」:透過 Realtime 的廣播(Broadcast)傳送,不存進資料庫
+  private typing = new TypingTracker((users) => this.emit('typing:update', users))
+  private lastTypingSent = 0
+
   constructor(url: string, anonKey: string) {
     // 這個專案不用登入,所以不需要 Supabase 的登入狀態儲存
     this.db = createClient(url, anonKey, {
@@ -122,8 +127,16 @@ export class SupabaseChatService implements ChatService {
       })
       .on('presence', { event: 'leave' }, (p) => {
         for (const m of p.leftPresences as unknown as PresenceMeta[]) {
-          if (this.me && m.clientId !== this.clientId) this.emit('user:left', this.toUser(m))
+          if (this.me && m.clientId !== this.clientId) {
+            this.typing.clear(m.clientId)
+            this.emit('user:left', this.toUser(m))
+          }
         }
+      })
+      .on('broadcast', { event: 'typing' }, (msg) => {
+        const t = msg.payload as { nickname?: string; clientId?: string } | undefined
+        if (!this.me || !t?.nickname || !t.clientId || t.clientId === this.clientId) return
+        this.typing.touch({ nickname: t.nickname, clientId: t.clientId, joinedAt: 0 })
       })
 
     const subscribed = await new Promise<boolean>((resolve) => {
@@ -175,10 +188,6 @@ export class SupabaseChatService implements ChatService {
     }
   }
 
-  async loadRecent(limit: number): Promise<Message[]> {
-    return this.fetchRecent(limit)
-  }
-
   async send(text: string): Promise<SendResult> {
     if (!this.me || this.status !== 'connected') return { ok: false, reason: 'network' }
     if (text.trim().length === 0) return { ok: false, reason: 'empty' }
@@ -189,8 +198,26 @@ export class SupabaseChatService implements ChatService {
     const { error } = await this.db
       .from(TABLE)
       .insert({ nickname: this.me.nickname, client_id: this.clientId, text })
-    if (error) return { ok: false, reason: error.code === '23514' ? 'too_long' : 'network' }
+    if (error) {
+      // 資料庫端的規則擋下來的:送太快(自訂錯誤 rate_limited)、超過長度(check constraint)
+      if (error.message?.includes('rate_limited')) return { ok: false, reason: 'rate_limited' }
+      if (error.code === '23514') return { ok: false, reason: 'too_long' }
+      return { ok: false, reason: 'network' }
+    }
     return { ok: true }
+  }
+
+  /** 使用者正在打字:廣播給其他人(最多每 1.5 秒一次) */
+  notifyTyping(): void {
+    if (!this.me || !this.channel || this.status !== 'connected') return
+    const now = Date.now()
+    if (now - this.lastTypingSent < 1500) return
+    this.lastTypingSent = now
+    void this.channel.send({
+      type: 'broadcast',
+      event: 'typing',
+      payload: { nickname: this.me.nickname, clientId: this.clientId },
+    })
   }
 
   async leave(): Promise<void> {
@@ -202,6 +229,7 @@ export class SupabaseChatService implements ChatService {
   private onInsert(row: Row): void {
     const n = Number(row.id)
     if (n > this.lastId) this.lastId = n
+    this.typing.clear(row.client_id) // 對方送出訊息了,不再「正在輸入」
     this.emit('message:new', toMessage(row))
   }
 
@@ -211,6 +239,7 @@ export class SupabaseChatService implements ChatService {
       // 斷線後 Supabase 自動重連成功:重新登記在線、補漏掉的訊息
       if (this.status !== 'connected') void this.resume()
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+      this.typing.reset()
       this.setStatus('reconnecting')
     }
   }
@@ -305,6 +334,7 @@ export class SupabaseChatService implements ChatService {
     this.channel = null
     this.me = null
     this.status = 'connecting'
+    this.typing.reset()
     if (!channel) return
     try {
       await channel.untrack()

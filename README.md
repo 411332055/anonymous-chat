@@ -26,9 +26,19 @@ npm run build     檢查型別並建置到 dist/
 npm run preview   預覽建置後的網站
 ```
 
+## 新增功能(超出標準版的部分)
+
+| 等級 | 功能 | 位置 |
+|---|---|---|
+| A 只在自己的畫面上 | 分頁標題顯示未讀數:`(3) 匿名聊天室` | `src/hooks/useUnreadTitle.ts` |
+| B 和所有人即時同步 | 「○○ 正在輸入…」 | `src/services/typingTracker.ts`、`src/components/TypingIndicator.tsx` |
+| C 伺服器端強制的規則 | 資料庫端的送出頻率限制與髒話過濾(Postgres 觸發器) | `supabase/server_rules.sql` |
+
+詳細說明、已知限制與驗證項目見 [docs/architecture.md](docs/architecture.md) 最後的〈新增功能〉一節。
+
 ## 連接 Supabase
 
-在專案根目錄建立 `.env.local`(內容照 `.env.example`),填入 Supabase 的 Project URL 與 publishable key。重新啟動 `npm run dev` 就會連到 Supabase。
+在專案根目錄建立 `.env.local`(內容照 `.env.example`),填入 Supabase 的 Project URL 與 publishable key。重新啟動 `npm run dev` 就會連到 Supabase。第一次設定還要在 Supabase 的 SQL Editor 執行 `supabase/setup.md` 與 `supabase/server_rules.sql` 裡的 SQL。
 
 ## 示範模式(沒設定 Supabase 時)
 

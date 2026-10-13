@@ -6,13 +6,15 @@ interface Props {
   /** 沒連線時為 true:仍可打字,但不能送出 */
   disconnected: boolean
   onSend: (text: string) => void
+  /** 使用者正在打字(有內容時,每次輸入都會呼叫;節流由資料來源負責) */
+  onTyping: () => void
 }
 
 /** 同一個人至少隔多久才能再送一則 */
 const MIN_INTERVAL_MS = 1000
 const MAX_TEXTAREA_HEIGHT = 132
 
-export function MessageInput({ disconnected, onSend }: Props) {
+export function MessageInput({ disconnected, onSend, onTyping }: Props) {
   const [value, setValue] = useState('')
   const [slowDown, setSlowDown] = useState(false)
   const lastSent = useRef(0)
@@ -45,9 +47,8 @@ export function MessageInput({ disconnected, onSend }: Props) {
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // 所有裝置:Enter 送出,Shift+Enter 換行。輸入法組字中的 Enter(選字)不算。
     if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return
-    // 手機(觸控)的 Enter 是換行,用按鈕送出;電腦的 Enter 送出
-    if (window.matchMedia('(pointer: coarse)').matches) return
     e.preventDefault()
     submit()
   }
@@ -65,10 +66,14 @@ export function MessageInput({ disconnected, onSend }: Props) {
           <textarea
             ref={area}
             rows={1}
+            enterKeyHint="send"
             aria-label="訊息"
             placeholder={disconnected ? '連線後才能送出' : '輸入訊息'}
             value={value}
-            onChange={(e) => setValue(e.target.value)}
+            onChange={(e) => {
+              setValue(e.target.value)
+              if (e.target.value.trim() !== '') onTyping()
+            }}
             onKeyDown={onKeyDown}
           />
         </div>

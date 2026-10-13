@@ -2,6 +2,7 @@ import { randomId, getTabClientId } from '../lib/clientId'
 import { filterProfanity } from '../lib/profanity'
 import { charCount, MESSAGE_MAX } from '../lib/validate'
 import { BOT_LINES, BOT_NAMES, BOTS_ONLINE_AT_START, SEED_CONVERSATION } from './mockBots'
+import { TypingTracker } from './typingTracker'
 import type {
   ChatEvents,
   ChatService,
@@ -29,6 +30,7 @@ type Packet =
   | { t: 'hello'; user: User }
   | { t: 'bye'; clientId: string }
   | { t: 'msg'; message: Message }
+  | { t: 'typing'; user: User }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 const rand = (min: number, max: number) => min + Math.random() * (max - min)
@@ -50,6 +52,10 @@ export class MockChatService implements ChatService {
   private offline = false
   private queue: Array<{ event: keyof ChatEvents; payload: unknown }> = []
   private timers = new Set<ReturnType<typeof setTimeout>>()
+
+  // 「正在輸入」:別人(其他分頁、機器人)的訊號,一段時間沒更新就自動消失
+  private typing = new TypingTracker((users) => this.emit('typing:update', users))
+  private lastTypingSent = 0
 
   constructor() {
     this.seed()
@@ -105,10 +111,6 @@ export class MockChatService implements ChatService {
     return { ok: true, recent: this.history.slice(-BACKFILL_LIMIT), online: this.onlineUsers() }
   }
 
-  async loadRecent(limit: number): Promise<Message[]> {
-    return this.history.slice(-limit)
-  }
-
   async send(text: string): Promise<SendResult> {
     await sleep(150)
     if (!this.me || this.offline) return { ok: false, reason: 'network' }
@@ -128,7 +130,17 @@ export class MockChatService implements ChatService {
     return { ok: true }
   }
 
+  /** 使用者正在打字:通知其他分頁(最多每 1.5 秒一次) */
+  notifyTyping(): void {
+    if (!this.me || this.offline) return
+    const now = Date.now()
+    if (now - this.lastTypingSent < 1500) return
+    this.lastTypingSent = now
+    this.post({ t: 'typing', user: this.me })
+  }
+
   async leave(): Promise<void> {
+    this.typing.reset()
     if (this.me) this.post({ t: 'bye', clientId: this.clientId })
     this.me = null
     this.offline = false
@@ -140,6 +152,7 @@ export class MockChatService implements ChatService {
   /* ---------------- 事件:離線時先排隊,連上後一起補送 ---------------- */
 
   private emit<K extends keyof ChatEvents>(event: K, payload: ChatEvents[K]): void {
+    if (event === 'typing:update' && this.offline) return // 斷線時不排隊,連上後就過期了
     const isStatus = event === 'connection:status'
     if (this.offline && !isStatus) {
       this.queue.push({ event, payload })
@@ -185,6 +198,7 @@ export class MockChatService implements ChatService {
       p.t === 'here' || p.t === 'hello' ? p.user.clientId
       : p.t === 'bye' ? p.clientId
       : p.t === 'msg' ? p.message.clientId
+      : p.t === 'typing' ? p.user.clientId
       : null
     if (from === this.clientId) return
 
@@ -202,7 +216,11 @@ export class MockChatService implements ChatService {
           this.emit('presence:sync', this.onlineUsers())
         }
         break
+      case 'typing':
+        if (this.me) this.typing.touch(p.user)
+        break
       case 'bye': {
+        this.typing.clear(p.clientId)
         const user = this.peers.get(p.clientId)
         if (!user) break
         this.peers.delete(p.clientId)
@@ -213,6 +231,7 @@ export class MockChatService implements ChatService {
         break
       }
       case 'msg':
+        this.typing.clear(p.message.clientId)
         if (this.me) {
           this.addToHistory(p.message)
           this.emit('message:new', p.message)
@@ -270,15 +289,21 @@ export class MockChatService implements ChatService {
         let line = pick(BOT_LINES)
         if (line === this.lastLine) line = pick(BOT_LINES)
         this.lastLine = line
-        const message: Message = {
-          id: randomId(),
-          nickname: bot.nickname,
-          clientId: bot.clientId,
-          text: filterProfanity(line),
-          sentAt: new Date().toISOString(),
-        }
-        this.addToHistory(message)
-        this.emit('message:new', message)
+        // 先顯示一下「正在輸入…」,再送出訊息(示範用,讓你看得到這個功能)
+        this.typing.touch(bot, 2500)
+        this.later(1400, () => {
+          if (!this.bots.has(bot.nickname)) return this.typing.clear(bot.clientId)
+          const message: Message = {
+            id: randomId(),
+            nickname: bot.nickname,
+            clientId: bot.clientId,
+            text: filterProfanity(line),
+            sentAt: new Date().toISOString(),
+          }
+          this.addToHistory(message)
+          this.typing.clear(bot.clientId)
+          this.emit('message:new', message)
+        })
       }
       this.scheduleChat()
     })
