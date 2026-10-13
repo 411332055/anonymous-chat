@@ -1,4 +1,5 @@
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js'
+import { startTicker } from '../lib/backgroundTicker'
 import { getTabClientId } from '../lib/clientId'
 import { charCount, MESSAGE_MAX, NICKNAME_MAX } from '../lib/validate'
 import { PresenceLiveness } from './presenceLiveness'
@@ -27,12 +28,21 @@ const PRESENCE_WAIT_MS = 1500
 /** 第一次連不上時,等多久再重試一次 */
 const RETRY_DELAY_MS = 1200
 /** 每隔多久更新一次自己的「心跳」(讓別人知道我還在線上) */
-const HEARTBEAT_MS = 8_000
+const HEARTBEAT_MS = 5_000
 /** 別人超過這麼久沒有更新心跳,就視為已離開(即使伺服器沒通知) */
-const LIVENESS_TTL_MS = 30_000
+const LIVENESS_TTL_MS = 25_000
+/** 伺服器說某人離開後,要持續消失這麼久才宣布他離開。
+ *  Supabase 的即時連線有時會被短暫重連,對方會消失幾秒又回來,這個緩衝避免畫面一直跳「離開了/進來了」。
+ *  (「心跳停止」那種判斷已經等過 LIVENESS_TTL_MS,不再多等。) */
+const LEAVE_GRACE_MS = 8_000
 /** 每隔多久重新核對一次「誰還在線上」 */
-const RECONCILE_MS = 3_000
+const RECONCILE_MS = 2_000
 const CLIENT_ID_MAX = 64
+/** 連線斷掉後自動重新加入:第一次等多久、最久等多久(每次失敗加倍) */
+const REJOIN_BASE_MS = 1_000
+const REJOIN_MAX_MS = 10_000
+/** 頻道不在「已加入」狀態連續幾次核對(每次 RECONCILE_MS)就判定連線已死、重新加入 */
+const UNHEALTHY_TICKS = 2
 
 interface PresenceMeta {
   nickname: string
@@ -90,6 +100,10 @@ const toMessage = (r: Row): Message => ({
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
+/** 等一件事最多 ms 毫秒;逾時就放棄(回傳 undefined),避免卡在已經斷掉的連線上 */
+const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T | undefined> =>
+  Promise.race([p, sleep(ms).then(() => undefined)])
+
 export class SupabaseChatService implements ChatService {
   readonly isDemo = false
   // 每個分頁各一個 clientId(重新整理不變),這樣同一個瀏覽器開多個分頁也能分清楚誰是誰
@@ -111,8 +125,18 @@ export class SupabaseChatService implements ChatService {
   private liveness = new PresenceLiveness(LIVENESS_TTL_MS)
   /** 目前畫面上認為在線的「別人」(用來產生「進來了/離開了」提示,避免重複) */
   private visible = new Map<string, User>()
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
-  private reconcileTimer: ReturnType<typeof setInterval> | null = null
+  /** 每個「畫面上還顯示在線、但已經從在線資料消失」的人,是從什麼時候開始消失的 */
+  private missingSince = new Map<string, number>()
+  // 用 Web Worker 計時,在背景分頁也不會被瀏覽器放慢
+  // 連線斷掉時自動重新加入(Supabase 有時會把連線乾淨地關掉,而且不會自己重連)
+  /** 使用者目前「想要」用的代號;有值就代表使用者還在聊天室裡,斷線時要自動重連 */
+  private desiredNickname: string | null = null
+  private rejoinTimer: ReturnType<typeof setTimeout> | null = null
+  private rejoinAttempts = 0
+  private rejoining = false
+  private unhealthyTicks = 0
+  private stopHeartbeat: (() => void) | null = null
+  private stopReconcile: (() => void) | null = null
 
   constructor(url: string, anonKey: string) {
     // 這個專案不用登入,所以不需要 Supabase 的登入狀態儲存
@@ -125,7 +149,9 @@ export class SupabaseChatService implements ChatService {
     window.addEventListener('online', () => void this.recover())
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') void this.recover()
+      this.reconcile()
     })
+    window.addEventListener('focus', () => this.reconcile())
 
     // 關掉分頁、重新整理、換網址:不等伺服器發現,主動告訴大家「我離開了」(盡力而為)
     window.addEventListener('pagehide', () => this.leaveQuietly())
@@ -147,6 +173,8 @@ export class SupabaseChatService implements ChatService {
 
   async join(nickname: string): Promise<JoinResult> {
     if (nickname.length === 0) return { ok: false, reason: 'invalid' }
+    this.desiredNickname = null
+    this.clearRejoin()
     // Realtime 閒置一陣子後,第一次連線偶爾會失敗(暖機),馬上再試一次通常就成功。
     // 只針對「連不上」重試;代號被占用這類明確的答案不重試。
     let result = await this.tryJoin(nickname)
@@ -154,6 +182,7 @@ export class SupabaseChatService implements ChatService {
       await sleep(RETRY_DELAY_MS)
       result = await this.tryJoin(nickname)
     }
+    if (result.ok) this.desiredNickname = nickname
     return result
   }
 
@@ -191,11 +220,11 @@ export class SupabaseChatService implements ChatService {
           clearTimeout(timer)
           resolve(true)
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-          console.warn('[chat] 加入頻道失敗:', status, err?.message ?? '')
+          if (channel === this.channel) console.warn('[chat] 頻道狀態:', status, err?.message ?? '')
           clearTimeout(timer)
           resolve(false)
         }
-        this.onChannelStatus(status)
+        this.onChannelStatus(status, channel)
       })
     })
     if (!subscribed) {
@@ -269,6 +298,8 @@ export class SupabaseChatService implements ChatService {
   }
 
   async leave(): Promise<void> {
+    this.desiredNickname = null
+    this.clearRejoin()
     await this.teardown()
   }
 
@@ -283,14 +314,81 @@ export class SupabaseChatService implements ChatService {
     this.emit('message:new', toMessage(row))
   }
 
-  private onChannelStatus(status: string): void {
+  private onChannelStatus(status: string, channel: RealtimeChannel): void {
+    if (channel !== this.channel) return // 已經被取代、或已經主動離開的舊頻道,不理它
     if (!this.me) return // 還在加入中,結果由 join() 自己處理
     if (status === 'SUBSCRIBED') {
-      // 斷線後 Supabase 自動重連成功:重新登記在線、補漏掉的訊息
+      // 斷線後 Supabase 自己重連成功:重新登記在線、補漏掉的訊息
+      this.clearRejoin()
+      this.unhealthyTicks = 0
       if (this.status !== 'connected') void this.resume()
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
       this.typing.reset()
       this.setStatus('reconnecting')
+      this.scheduleRejoin()
+    }
+  }
+
+  /** 頻道或連線已經死了、Supabase 又沒有自己重連:我們自己重新建立連線 */
+  private scheduleRejoin(immediate = false): void {
+    if (!this.desiredNickname || this.rejoinTimer || this.rejoining) return
+    const delay = immediate ? 0 : Math.min(REJOIN_BASE_MS * 2 ** this.rejoinAttempts, REJOIN_MAX_MS)
+    this.rejoinTimer = setTimeout(() => {
+      this.rejoinTimer = null
+      void this.rejoin()
+    }, delay)
+  }
+
+  private clearRejoin(): void {
+    if (this.rejoinTimer) clearTimeout(this.rejoinTimer)
+    this.rejoinTimer = null
+    this.rejoinAttempts = 0
+    this.unhealthyTicks = 0
+  }
+
+  private async rejoin(): Promise<void> {
+    const nickname = this.desiredNickname
+    if (!nickname || this.rejoining) return
+    this.rejoining = true
+    this.rejoinAttempts++
+    const lastId = this.lastId
+    const before = new Map(this.visible)
+
+    const result = await this.tryJoin(nickname)
+    this.rejoining = false
+
+    if (!this.desiredNickname) {
+      // 重連的途中使用者按了「換代號」:把剛建好的連線收掉
+      if (result.ok) await this.teardown()
+      return
+    }
+    if (!result.ok) {
+      this.setStatus('reconnecting')
+      this.scheduleRejoin()
+      return
+    }
+
+    // 重連成功:補上斷線期間漏掉的訊息、補發進出提示、更新名單
+    this.rejoinAttempts = 0
+    this.lastId = lastId
+    await this.catchUp()
+    for (const [id, u] of this.visible) if (!before.has(id)) this.emit('user:joined', u)
+    for (const [id, u] of before) if (!this.visible.has(id)) this.emit('user:left', u)
+    this.emit('presence:sync', this.onlineUsers())
+  }
+
+  /** 定期檢查頻道是不是還活著;死了(而且沒有人在處理)就重新加入 */
+  private checkHealth(): void {
+    if (!this.me || !this.channel || this.rejoining || this.rejoinTimer) return
+    const state = String(this.channel.state)
+    if (state !== 'closed' && state !== 'errored') {
+      this.unhealthyTicks = 0
+      return
+    }
+    this.unhealthyTicks++
+    if (this.unhealthyTicks >= UNHEALTHY_TICKS) {
+      this.setStatus('reconnecting')
+      this.scheduleRejoin(true)
     }
   }
 
@@ -304,6 +402,11 @@ export class SupabaseChatService implements ChatService {
   private async recover(): Promise<void> {
     if (!this.me || !this.channel) return
     const ok = await this.catchUp()
+    const state = String(this.channel.state)
+    if (state === 'closed' || state === 'errored') {
+      this.scheduleRejoin(true)
+      return
+    }
     if (ok && this.channel.state === 'joined') {
       this.reconcile()
       this.emit('presence:sync', this.onlineUsers())
@@ -363,20 +466,28 @@ export class SupabaseChatService implements ChatService {
     return [...byId.values()]
   }
 
-  /** 「別人」之中仍然活著的(伺服器還沒通知離開、但心跳停了的人會被排除) */
-  private aliveOthers(): User[] {
+  /** 「別人」之中:仍然活著的,以及「伺服器目前還記得」的人(後者包含心跳已停止的) */
+  private othersStatus(): { alive: User[]; presentIds: Set<string> } {
     const others = this.presenceEntries().filter((e) => e.user.clientId !== this.clientId)
-    const alive = this.liveness.update(
+    const aliveIds = this.liveness.update(
       others.map((e) => ({ clientId: e.user.clientId, beat: e.beat })),
       Date.now(),
     )
-    return others.filter((e) => alive.has(e.user.clientId)).map((e) => e.user)
+    return {
+      alive: others.filter((e) => aliveIds.has(e.user.clientId)).map((e) => e.user),
+      presentIds: new Set(others.map((e) => e.user.clientId)),
+    }
+  }
+
+  private aliveOthers(): User[] {
+    return this.othersStatus().alive
   }
 
   /** 比對「畫面上認為在線的人」和「實際還活著的人」:有差異就發出進出提示並更新名單 */
   private reconcile(): void {
     if (!this.me) return
-    const alive = new Map(this.aliveOthers().map((u) => [u.clientId, u]))
+    const status = this.othersStatus()
+    const alive = new Map(status.alive.map((u) => [u.clientId, u]))
     let changed = false
     for (const [id, u] of alive) {
       if (this.visible.has(id)) continue
@@ -384,8 +495,20 @@ export class SupabaseChatService implements ChatService {
       changed = true
       this.emit('user:joined', u)
     }
+    const now = Date.now()
     for (const [id, u] of [...this.visible]) {
-      if (alive.has(id)) continue
+      if (alive.has(id)) {
+        this.missingSince.delete(id)
+        continue
+      }
+      // 伺服器已經沒有這個人的資料(通知離開):先等一下,可能只是對方的連線短暫重連。
+      // 伺服器還記得他、但心跳停了(已經等過逾時):不用再等。
+      if (!status.presentIds.has(id)) {
+        const since = this.missingSince.get(id) ?? now
+        this.missingSince.set(id, since)
+        if (now - since < LEAVE_GRACE_MS) continue
+      }
+      this.missingSince.delete(id)
       this.visible.delete(id)
       changed = true
       this.typing.clear(id)
@@ -402,15 +525,18 @@ export class SupabaseChatService implements ChatService {
 
   private startTimers(): void {
     this.stopTimers()
-    this.heartbeatTimer = setInterval(() => this.beat(), HEARTBEAT_MS)
-    this.reconcileTimer = setInterval(() => this.reconcile(), RECONCILE_MS)
+    this.stopHeartbeat = startTicker(HEARTBEAT_MS, () => this.beat())
+    this.stopReconcile = startTicker(RECONCILE_MS, () => {
+      this.checkHealth()
+      this.reconcile()
+    })
   }
 
   private stopTimers(): void {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
-    if (this.reconcileTimer) clearInterval(this.reconcileTimer)
-    this.heartbeatTimer = null
-    this.reconcileTimer = null
+    this.stopHeartbeat?.()
+    this.stopReconcile?.()
+    this.stopHeartbeat = null
+    this.stopReconcile = null
   }
 
   /** 更新自己的心跳,讓別人知道我還在線上 */
@@ -461,12 +587,14 @@ export class SupabaseChatService implements ChatService {
     this.me = null
     this.status = 'connecting'
     this.visible.clear()
+    this.missingSince.clear()
     this.stopTimers()
     this.typing.reset()
     if (!channel) return
     try {
-      await channel.untrack()
-      await this.db.removeChannel(channel)
+      // 連線可能已經死了,不要一直等它回應
+      await withTimeout(channel.untrack(), 1500)
+      await withTimeout(this.db.removeChannel(channel), 1500)
     } catch {
       /* 已經斷線就算了,伺服器會自己判定離線 */
     }
