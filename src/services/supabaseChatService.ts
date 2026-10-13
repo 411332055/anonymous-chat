@@ -22,6 +22,8 @@ const BACKFILL_LIMIT = 50
 const SUBSCRIBE_TIMEOUT_MS = 10_000
 /** 加入頻道後,等多久讓「目前在線名單」送過來,才判斷代號有沒有人用 */
 const PRESENCE_WAIT_MS = 1500
+/** 第一次連不上時,等多久再重試一次 */
+const RETRY_DELAY_MS = 1200
 
 interface PresenceMeta {
   nickname: string
@@ -86,6 +88,17 @@ export class SupabaseChatService implements ChatService {
 
   async join(nickname: string): Promise<JoinResult> {
     if (nickname.length === 0) return { ok: false, reason: 'invalid' }
+    // Realtime 閒置一陣子後,第一次連線偶爾會失敗(暖機),馬上再試一次通常就成功。
+    // 只針對「連不上」重試;代號被占用這類明確的答案不重試。
+    let result = await this.tryJoin(nickname)
+    if (!result.ok && result.reason === 'network') {
+      await sleep(RETRY_DELAY_MS)
+      result = await this.tryJoin(nickname)
+    }
+    return result
+  }
+
+  private async tryJoin(nickname: string): Promise<JoinResult> {
     await this.teardown()
 
     const channel = this.db.channel(ROOM, { config: { presence: { key: this.clientId } } })
@@ -115,11 +128,12 @@ export class SupabaseChatService implements ChatService {
 
     const subscribed = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => resolve(false), SUBSCRIBE_TIMEOUT_MS)
-      channel.subscribe((status) => {
+      channel.subscribe((status, err) => {
         if (status === 'SUBSCRIBED') {
           clearTimeout(timer)
           resolve(true)
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          console.warn('[chat] 加入頻道失敗:', status, err?.message ?? '')
           clearTimeout(timer)
           resolve(false)
         }
